@@ -1,63 +1,70 @@
 #[macro_use]
 extern crate glium;
 
+use std::io::Cursor;
+
 fn main() {
     #[allow(unused_imports)]
     use glium::{glutin, Surface};
 
-    // Define glium opengl window, ect... stuff
     let event_loop = glutin::event_loop::EventLoop::new();
     let wb = glutin::window::WindowBuilder::new();
     let cb = glutin::ContextBuilder::new();
     let display = glium::Display::new(wb, cb, &event_loop).unwrap();
 
-    // Represents a vertex with a position
+    let image = image::load(Cursor::new(&include_bytes!("alien.jpg")),
+                            image::ImageFormat::Jpeg).unwrap().to_rgba8();
+    let image_dimensions = image.dimensions();
+    let image = glium::texture::RawImage2d::from_raw_rgba_reversed(&image.into_raw(), image_dimensions);
+    let texture = glium::texture::Texture2d::new(&display, image).unwrap();
+
     #[derive(Copy, Clone)]
     struct Vertex {
         position: [f32; 2],
+        tex_coords: [f32; 2],
     }
 
-    implement_vertex!(Vertex, position);
+    implement_vertex!(Vertex, position, tex_coords);
 
-    // Define vertices and shape here
-    let vertex1 = Vertex { position: [-0.5, -0.5] };
-    let vertex2 = Vertex { position: [ 0.0,  0.5] };
-    let vertex3 = Vertex { position: [ 0.5, -0.5] };
+    let vertex1 = Vertex { position: [-0.5, -0.5], tex_coords: [0.0, 0.0] };
+    let vertex2 = Vertex { position: [ 0.0,  0.5], tex_coords: [0.0, 1.0] };
+    let vertex3 = Vertex { position: [ 0.5, -0.25], tex_coords: [1.0, 0.0] };
     let shape = vec![vertex1, vertex2, vertex3];
 
-    // Define vertex buffer and put stuff in idk
     let vertex_buffer = glium::VertexBuffer::new(&display, &shape).unwrap();
     let indices = glium::index::NoIndices(glium::index::PrimitiveType::TrianglesList);
 
-    // Vertex shader GLSL now takes in matrix
     let vertex_shader_src = r#"
         #version 140
 
         in vec2 position;
+        in vec2 tex_coords;
+        out vec2 v_tex_coords;
 
         uniform mat4 matrix;
 
         void main() {
+            v_tex_coords = tex_coords;
             gl_Position = matrix * vec4(position, 0.0, 1.0);
         }
     "#;
 
-    // Fragment shader GLSL
     let fragment_shader_src = r#"
         #version 140
 
+        in vec2 v_tex_coords;
         out vec4 color;
 
+        uniform sampler2D tex;
+
         void main() {
-            color = vec4(1.0, 0.0, 0.0, 1.0);
+            color = texture(tex, v_tex_coords);
         }
     "#;
-    
-    // Create glium program and pass it shaders
+
     let program = glium::Program::from_source(&display, vertex_shader_src, fragment_shader_src, None).unwrap();
-    
-    // Define animation step
-    let mut t: f32 = 1.0;
+
+    let mut t = -0.5;
     event_loop.run(move |event, _, control_flow| {
 
         match event {
@@ -77,28 +84,30 @@ fn main() {
         }
 
         let next_frame_time = std::time::Instant::now() +
-            std::time::Duration::from_nanos(8_333_334);
+            std::time::Duration::from_nanos(16_666_667);
         *control_flow = glutin::event_loop::ControlFlow::WaitUntil(next_frame_time);
 
         // we update `t`
-        t += 0.05;
-        
+        t += 0.0002;
+        if t > 0.5 {
+            t = -0.5;
+        }
 
-        // Define target object
         let mut target = display.draw();
         target.clear_color(0.0, 0.0, 1.0, 1.0);
 
         let uniforms = uniform! {
             matrix: [
-                [ t.cos(), t.sin(), 0.0, 0.0],
-                [-t.sin(), t.cos(), 0.0, 0.0],
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
                 [0.0, 0.0, 1.0, 0.0],
-                [0.0, 0.0, 0.0, 1.0f32],
-            ]
+                [ t , 0.0, 0.0, 1.0f32],
+            ],
+            tex: &texture,
         };
 
-        // Draw target (triangle) here with all the needed data and parameters
-        target.draw(&vertex_buffer, &indices, &program, &uniforms, &Default::default()).unwrap();
+        target.draw(&vertex_buffer, &indices, &program, &uniforms,
+                    &Default::default()).unwrap();
         target.finish().unwrap();
     });
 }
