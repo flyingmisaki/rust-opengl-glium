@@ -1,40 +1,67 @@
 #[macro_use]
 extern crate glium;
 
-#[path = "teapot.rs"]
-mod teapot;
+use std::io::Cursor;
 
 fn main() {
     #[allow(unused_imports)]
     use glium::{glutin, Surface};
 
     let event_loop = glutin::event_loop::EventLoop::new();
-    let wb = glutin::window::WindowBuilder::new(); // .with_inner_size(glutin::dpi::LogicalSize::new(750.0, 750.0))
+    let wb = glutin::window::WindowBuilder::new();
     let cb = glutin::ContextBuilder::new().with_depth_buffer(24);
     let display = glium::Display::new(wb, cb, &event_loop).unwrap();
 
-    let positions = glium::VertexBuffer::new(&display, &teapot::VERTICES).unwrap();
-    let normals = glium::VertexBuffer::new(&display, &teapot::NORMALS).unwrap();
-    let indices = glium::IndexBuffer::new(&display, glium::index::PrimitiveType::TrianglesList,
-                                          &teapot::INDICES).unwrap();
+    #[derive(Copy, Clone)]
+    struct Vertex {
+        position: [f32; 3],
+        normal: [f32; 3],
+        tex_coords: [f32; 2],
+    }
+
+    implement_vertex!(Vertex, position, normal, tex_coords);
+
+    let shape = glium::vertex::VertexBuffer::new(&display, &[
+            Vertex { position: [-1.0,  1.0, 0.0], normal: [0.0, 0.0, -1.0], tex_coords: [0.0, 1.0] },
+            Vertex { position: [ 1.0,  1.0, 0.0], normal: [0.0, 0.0, -1.0], tex_coords: [1.0, 1.0] },
+            Vertex { position: [-1.0, -1.0, 0.0], normal: [0.0, 0.0, -1.0], tex_coords: [0.0, 0.0] },
+            Vertex { position: [ 1.0, -1.0, 0.0], normal: [0.0, 0.0, -1.0], tex_coords: [1.0, 0.0] },
+        ]).unwrap();
+
+
+    let image = image::load(Cursor::new(&include_bytes!("tuto-14-diffuse.jpg")),
+                            image::ImageFormat::Jpeg).unwrap().to_rgba8();
+    let image_dimensions = image.dimensions();
+    let image = glium::texture::RawImage2d::from_raw_rgba_reversed(&image.into_raw(), image_dimensions);
+    let diffuse_texture = glium::texture::SrgbTexture2d::new(&display, image).unwrap();
+
+    let image = image::load(Cursor::new(&include_bytes!("tuto-14-normal.png")),
+                            image::ImageFormat::Png).unwrap().to_rgba8();
+    let image_dimensions = image.dimensions();
+    let image = glium::texture::RawImage2d::from_raw_rgba_reversed(&image.into_raw(), image_dimensions);
+    let normal_map = glium::texture::Texture2d::new(&display, image).unwrap();
+
 
     let vertex_shader_src = r#"
         #version 150
 
         in vec3 position;
         in vec3 normal;
+        in vec2 tex_coords;
 
         out vec3 v_normal;
         out vec3 v_position;
+        out vec2 v_tex_coords;
 
         uniform mat4 perspective;
         uniform mat4 view;
         uniform mat4 model;
 
         void main() {
-            mat4 model_view = view * model;
-            v_normal = transpose(inverse(mat3(model_view))) * normal;
-            gl_Position = perspective * model_view * vec4(position, 1.0);
+            v_tex_coords = tex_coords;
+            mat4 modelview = view * model;
+            v_normal = transpose(inverse(mat3(modelview))) * normal;
+            gl_Position = perspective * modelview * vec4(position, 1.0);
             v_position = gl_Position.xyz / gl_Position.w;
         }
     "#;
@@ -44,23 +71,45 @@ fn main() {
 
         in vec3 v_normal;
         in vec3 v_position;
+        in vec2 v_tex_coords;
 
         out vec4 color;
 
         uniform vec3 u_light;
+        uniform sampler2D diffuse_tex;
+        uniform sampler2D normal_tex;
 
-        const vec3 ambient_color = vec3(0.2, 0.0, 0.0);
-        const vec3 diffuse_color = vec3(0.6, 0.0, 0.0);
         const vec3 specular_color = vec3(1.0, 1.0, 1.0);
 
+        mat3 cotangent_frame(vec3 normal, vec3 pos, vec2 uv) {
+            vec3 dp1 = dFdx(pos);
+            vec3 dp2 = dFdy(pos);
+            vec2 duv1 = dFdx(uv);
+            vec2 duv2 = dFdy(uv);
+
+            vec3 dp2perp = cross(dp2, normal);
+            vec3 dp1perp = cross(normal, dp1);
+            vec3 T = dp2perp * duv1.x + dp1perp * duv2.x;
+            vec3 B = dp2perp * duv1.y + dp1perp * duv2.y;
+
+            float invmax = inversesqrt(max(dot(T, T), dot(B, B)));
+            return mat3(T * invmax, B * invmax, normal);
+        }
 
         void main() {
-            float diffuse = max(dot(normalize(v_normal), normalize(u_light)), 0.0);
-        
+            vec3 diffuse_color = texture(diffuse_tex, v_tex_coords).rgb;
+            vec3 ambient_color = diffuse_color * 0.1;
+
+            vec3 normal_map = texture(normal_tex, v_tex_coords).rgb;
+            mat3 tbn = cotangent_frame(v_normal, v_position, v_tex_coords);
+            vec3 real_normal = normalize(tbn * -(normal_map * 2.0 - 1.0));
+
+            float diffuse = max(dot(real_normal, normalize(u_light)), 0.0);
+
             vec3 camera_dir = normalize(-v_position);
             vec3 half_direction = normalize(normalize(u_light) + camera_dir);
-            float specular = pow(max(dot(half_direction, normalize(v_normal)), 0.0), 16.0);
-        
+            float specular = pow(max(dot(half_direction, real_normal), 0.0), 16.0);
+
             color = vec4(ambient_color + diffuse * diffuse_color + specular * specular_color, 1.0);
         }
     "#;
@@ -90,27 +139,27 @@ fn main() {
         }
 
         let mut target = display.draw();
-        target.clear_color_and_depth((0.01, 0.01, 0.01, 1.0), 1.0);
+        target.clear_color_and_depth((0.0, 0.0, 1.0, 1.0), 1.0);
 
         let model = [
-            [0.01, 0.0, 0.0, 0.0],
-            [0.0, 0.01, 0.0, 0.0],
-            [0.0, 0.0, 0.01, 0.0],
-            [0.0, 0.0, 2.0, 1.0f32]
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0f32]
         ];
 
-        let view = view_matrix(&[2.0, -1.0, 1.0], &[-2.0, 1.0, 1.0], &[0.0, 1.0, 0.0]);
+        let view = view_matrix(&[0.5, 0.2, -3.0], &[-0.5, -0.2, 3.0], &[0.0, 1.0, 0.0]);
 
         let perspective = {
             let (width, height) = target.get_dimensions();
             let aspect_ratio = height as f32 / width as f32;
-        
+
             let fov: f32 = 3.141592 / 3.0;
             let zfar = 1024.0;
             let znear = 0.1;
-        
+
             let f = 1.0 / (fov / 2.0).tan();
-        
+
             [
                 [f *   aspect_ratio   ,    0.0,              0.0              ,   0.0],
                 [         0.0         ,     f ,              0.0              ,   0.0],
@@ -119,7 +168,7 @@ fn main() {
             ]
         };
 
-        let light = [-1.0, 0.4, 0.9f32];
+        let light = [1.4, 0.4, 0.7f32];
 
         let params = glium::DrawParameters {
             depth: glium::Depth {
@@ -127,14 +176,17 @@ fn main() {
                 write: true,
                 .. Default::default()
             },
-            backface_culling: glium::draw_parameters::BackfaceCullingMode::CullClockwise,
             .. Default::default()
         };
 
-        target.draw((&positions, &normals), &indices, &program, &uniform! { model: model, view: view, perspective: perspective, u_light: light }, &params).unwrap();
+        target.draw(&shape, glium::index::NoIndices(glium::index::PrimitiveType::TriangleStrip), &program,
+                    &uniform! { model: model, view: view, perspective: perspective,
+                                u_light: light, diffuse_tex: &diffuse_texture, normal_tex: &normal_map },
+                    &params).unwrap();
         target.finish().unwrap();
     });
 }
+
 
 fn view_matrix(position: &[f32; 3], direction: &[f32; 3], up: &[f32; 3]) -> [[f32; 4]; 4] {
     let f = {
